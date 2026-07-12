@@ -493,11 +493,11 @@ export default function FlightSimulator() {
       const blend = THREE.MathUtils.smoothstep(bValue, 0.32, 0.38);
       height = THREE.MathUtils.lerp(heightBadlands, heightVolcanic, blend);
       biomeType = blend < 0.5 ? BiomeType.Badlands : BiomeType.Volcanic;
-    } else if (bValue < 0.52) {
+    } else if (bValue < 0.72) {
       height = heightVolcanic;
       biomeType = BiomeType.Volcanic;
-    } else if (bValue < 0.58) {
-      const blend = THREE.MathUtils.smoothstep(bValue, 0.52, 0.58);
+    } else if (bValue < 0.80) {
+      const blend = THREE.MathUtils.smoothstep(bValue, 0.72, 0.80);
       height = THREE.MathUtils.lerp(heightVolcanic, heightArctic, blend);
       biomeType = blend < 0.5 ? BiomeType.Volcanic : BiomeType.Arctic;
     } else {
@@ -633,13 +633,13 @@ export default function FlightSimulator() {
       grass.copy(profileBadlands.grass).lerp(profileVolcanic.grass, blend);
       rock.copy(profileBadlands.rock).lerp(profileVolcanic.rock, blend);
       snow.copy(profileBadlands.snow).lerp(profileVolcanic.snow, blend);
-    } else if (bValue < 0.52) {
+    } else if (bValue < 0.72) {
       sand.copy(profileVolcanic.sand);
       grass.copy(profileVolcanic.grass);
       rock.copy(profileVolcanic.rock);
       snow.copy(profileVolcanic.snow);
-    } else if (bValue < 0.58) {
-      const blend = THREE.MathUtils.smoothstep(bValue, 0.52, 0.58);
+    } else if (bValue < 0.80) {
+      const blend = THREE.MathUtils.smoothstep(bValue, 0.72, 0.80);
       sand.copy(profileVolcanic.sand).lerp(profileArctic.sand, blend);
       grass.copy(profileVolcanic.grass).lerp(profileArctic.grass, blend);
       rock.copy(profileVolcanic.rock).lerp(profileArctic.rock, blend);
@@ -694,13 +694,13 @@ export default function FlightSimulator() {
       const blend = THREE.MathUtils.smoothstep(bValue, 0.32, 0.38);
       color.copy(wtBadlands.color).lerp(wtVolcanic.color, blend);
       emissive.copy(wtBadlands.emissive).lerp(wtVolcanic.emissive, blend);
-    } else if (bValue < 0.52) {
-      color.copy(wtVolcanic.color);
-      emissive.copy(wtVolcanic.emissive);
-    } else if (bValue < 0.58) {
-      const blend = THREE.MathUtils.smoothstep(bValue, 0.52, 0.58);
-      color.copy(wtVolcanic.color).lerp(wtArctic.color, blend);
-      emissive.copy(wtVolcanic.emissive).lerp(wtArctic.emissive, blend);
+    } else if (bValue < 0.72) {
+       color.copy(wtVolcanic.color);
+       emissive.copy(wtVolcanic.emissive);
+     } else if (bValue < 0.80) {
+       const blend = THREE.MathUtils.smoothstep(bValue, 0.72, 0.80);
+       color.copy(wtVolcanic.color).lerp(wtArctic.color, blend);
+       emissive.copy(wtVolcanic.emissive).lerp(wtArctic.emissive, blend);
     } else {
       color.copy(wtArctic.color);
       emissive.copy(wtArctic.emissive);
