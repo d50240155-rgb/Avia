@@ -1,0 +1,6 @@
+{
+  "name": "Pro Flight Simulator",
+  "description": "An immersive, photo-realistic WebGL 3D flight simulator featuring advanced procedural terrain with diverse biomes, physical lighting, dynamic day-night cycles, and atmospheric weather effects.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
