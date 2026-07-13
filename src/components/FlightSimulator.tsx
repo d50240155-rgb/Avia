@@ -178,6 +178,15 @@ export default function FlightSimulator() {
     const saved = localStorage.getItem("flight_sim_acrobatic_mode");
     return saved !== null ? saved === "true" : false;
   });
+  const [performanceMode, setPerformanceMode] = useState<boolean>(() => {
+    const saved = localStorage.getItem("flight_sim_performance_mode");
+    if (saved !== null) {
+      return saved === "true";
+    }
+    const isMobileDevice = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent) || 
+                          (navigator.maxTouchPoints > 0);
+    return isMobileDevice;
+  });
   const [viewDistanceSetting, setViewDistanceSetting] = useState<number>(() => {
     const saved = localStorage.getItem("flight_sim_view_distance");
     return saved !== null ? parseInt(saved, 10) : 2;
@@ -229,7 +238,13 @@ export default function FlightSimulator() {
   const invertYRef = useRef<boolean>(false);
   const warningsEnabledRef = useRef<boolean>(true);
   const acrobaticModeRef = useRef<boolean>(false);
+  const performanceModeRef = useRef<boolean>(performanceMode);
   const viewDistanceRef = useRef<number>(2);
+
+  useEffect(() => {
+    performanceModeRef.current = performanceMode;
+    localStorage.setItem("flight_sim_performance_mode", String(performanceMode));
+  }, [performanceMode]);
 
   useEffect(() => {
     viewDistanceRef.current = viewDistanceSetting;
@@ -839,13 +854,15 @@ export default function FlightSimulator() {
     const hemiLight = new THREE.HemisphereLight(0xb1e1fc, 0x3d5a32, 0.6);
     scene.add(hemiLight);
 
+    const usePerformance = performanceModeRef.current;
+
     const sun = new THREE.DirectionalLight(0xfff5e6, 1.4);
     sun.castShadow = true;
-    sun.shadow.mapSize.width = 2048;
-    sun.shadow.mapSize.height = 2048;
+    sun.shadow.mapSize.width = usePerformance ? 512 : 2048;
+    sun.shadow.mapSize.height = usePerformance ? 512 : 2048;
     sun.shadow.camera.near = 10;
     sun.shadow.camera.far = 3000;
-    const sD = 600;
+    const sD = usePerformance ? 300 : 600;
     sun.shadow.camera.left = -sD;
     sun.shadow.camera.right = sD;
     sun.shadow.camera.top = sD;
@@ -856,11 +873,11 @@ export default function FlightSimulator() {
     // Moonlight for gorgeous night scenery
     const moon = new THREE.DirectionalLight(0xaaccff, 0.4);
     moon.castShadow = true;
-    moon.shadow.mapSize.width = 1024;
-    moon.shadow.mapSize.height = 1024;
+    moon.shadow.mapSize.width = usePerformance ? 256 : 1024;
+    moon.shadow.mapSize.height = usePerformance ? 256 : 1024;
     moon.shadow.camera.near = 10;
     moon.shadow.camera.far = 3000;
-    const mD = 600;
+    const mD = usePerformance ? 300 : 600;
     moon.shadow.camera.left = -mD;
     moon.shadow.camera.right = mD;
     moon.shadow.camera.top = mD;
@@ -2007,33 +2024,42 @@ export default function FlightSimulator() {
         const xOffset = gridX * CHUNK_SIZE;
         const zOffset = gridZ * CHUNK_SIZE;
 
-        const geometry = new THREE.PlaneGeometry(CHUNK_SIZE, CHUNK_SIZE, CHUNK_RES, CHUNK_RES);
+        const usePerformance = performanceModeRef.current;
+        const chunkRes = usePerformance ? 40 : CHUNK_RES;
+
+        const geometry = new THREE.PlaneGeometry(CHUNK_SIZE, CHUNK_SIZE, chunkRes, chunkRes);
         geometry.rotateX(-Math.PI / 2);
 
         const pos = geometry.attributes.position;
+        const count = pos.count;
         const colors: number[] = [];
         const colorObj = new THREE.Color();
-        const cols = CHUNK_RES + 1;
+        const cols = chunkRes + 1;
 
-        // Pass 1: Set Heights with a gentle organic noise shift to break up flat cliff grids.
+        const cachedBValues = new Float32Array(count);
+        const cachedBiomes = new Array<BiomeType>(count);
+
         // Pass 1: Set Heights on a clean uniform grid to prevent any self-intersection or protruding polygons on steep slopes
-        for (let i = 0; i < pos.count; i++) {
+        for (let i = 0; i < count; i++) {
           const vx = pos.getX(i) + xOffset;
           const vz = pos.getZ(i) + zOffset;
           
-          const { height } = getTerrainHeightAndBiome(vx, vz);
+          const { height, biomeType, bValue } = getTerrainHeightAndBiome(vx, vz);
           pos.setY(i, height);
+          cachedBValues[i] = bValue;
+          cachedBiomes[i] = biomeType;
         }
 
         geometry.computeVertexNormals();
         const normals = geometry.attributes.normal;
 
-        // Pass 2: Physically Accurate Colors & Crevice Ambient Occlusion
-        for (let i = 0; i < pos.count; i++) {
+        // Pass 2: Physically Accurate Colors & Crevice Ambient Occlusion with fully cached noise details
+        for (let i = 0; i < count; i++) {
           const vx = pos.getX(i) + xOffset;
           const vz = pos.getZ(i) + zOffset;
           const h = pos.getY(i);
-          const { biomeType, bValue } = getTerrainHeightAndBiome(vx, vz);
+          const bValue = cachedBValues[i];
+          const biomeType = cachedBiomes[i];
 
           const ny = normals.getY(i);
           const slope = 1.0 - ny;
@@ -2047,9 +2073,9 @@ export default function FlightSimulator() {
           const col = i % cols;
 
           if (col > 0) hLeft = pos.getY(i - 1);
-          if (col < CHUNK_RES) hRight = pos.getY(i + 1);
+          if (col < chunkRes) hRight = pos.getY(i + 1);
           if (row > 0) hBack = pos.getY(i - cols);
-          if (row < CHUNK_RES) hForward = pos.getY(i + cols);
+          if (row < chunkRes) hForward = pos.getY(i + cols);
 
           const avgNeighborHeight = (hLeft + hRight + hBack + hForward) / 4;
           const creviceDepth = h - avgNeighborHeight;
@@ -2112,7 +2138,7 @@ export default function FlightSimulator() {
         const chunkMesh = new THREE.Mesh(geometry, material);
         chunkMesh.position.set(xOffset, 0, zOffset);
         chunkMesh.receiveShadow = true;
-        chunkMesh.castShadow = true;
+        chunkMesh.castShadow = !usePerformance;
         this.mesh.add(chunkMesh);
 
         // --- STATIC LOCAL CHUNK WATER PLANE ---
@@ -2173,10 +2199,15 @@ export default function FlightSimulator() {
           forestCount = 4 + Math.floor(Math.random() * 4); // Sparse snowy pine communities
         }
 
+        if (usePerformance) {
+          forestCount = Math.max(1, Math.floor(forestCount * 0.4));
+        }
+
         for (let f = 0; f < forestCount; f++) {
           let cx = 0, cz = 0, cy = 0;
           let found = false;
-          for (let attempts = 0; attempts < 40; attempts++) {
+          const maxTreeAttempts = usePerformance ? 15 : 40;
+          for (let attempts = 0; attempts < maxTreeAttempts; attempts++) {
             cx = xOffset + (Math.random() - 0.5) * CHUNK_SIZE * 0.85;
             cz = zOffset + (Math.random() - 0.5) * CHUNK_SIZE * 0.85;
             const { height } = getTerrainHeightAndBiome(cx, cz);
@@ -2189,7 +2220,10 @@ export default function FlightSimulator() {
           if (!found) continue;
 
           // Spawn a beautifully clustered community of 50 to 95 trees for a highly populated look
-          const numTrees = 50 + Math.floor(Math.random() * 45);
+          let numTrees = 50 + Math.floor(Math.random() * 45);
+          if (usePerformance) {
+            numTrees = Math.floor(numTrees * 0.35);
+          }
           const rad = 30 + Math.random() * 20; // larger grove radius
           for (let t = 0; t < numTrees; t++) {
             const angle = Math.random() * Math.PI * 2;
@@ -2245,8 +2279,8 @@ export default function FlightSimulator() {
               }
 
               // Undergrowth bushes around forest trees to create high organic density
-              if (Math.random() < 0.65) {
-                const numShrubs = 1 + Math.floor(Math.random() * 2);
+              if (Math.random() < (usePerformance ? 0.25 : 0.65)) {
+                const numShrubs = 1 + Math.floor(Math.random() * (usePerformance ? 1 : 2));
                 for (let s = 0; s < numShrubs; s++) {
                   const sAngle = Math.random() * Math.PI * 2;
                   const sDist = 1.5 + Math.random() * 2.5;
@@ -2268,14 +2302,16 @@ export default function FlightSimulator() {
 
         // 1.5. COLORFUL MEADOW FLOWER FIELDS
         if (chunkBiome === BiomeType.Alpine || chunkBiome === BiomeType.Tropical || chunkBiome === BiomeType.Forest) {
-          const flowerPatchCount = 10 + Math.floor(Math.random() * 8);
+          let flowerPatchCount = 10 + Math.floor(Math.random() * 8);
+          if (usePerformance) flowerPatchCount = Math.floor(flowerPatchCount * 0.3);
           for (let fp = 0; fp < flowerPatchCount; fp++) {
             const cx = xOffset + (Math.random() - 0.5) * CHUNK_SIZE * 0.85;
             const cz = zOffset + (Math.random() - 0.5) * CHUNK_SIZE * 0.85;
             const { height: cy } = getTerrainHeightAndBiome(cx, cz);
             
             if (cy > WATER_LEVEL + 8 && cy < 110) {
-              const numFlowers = 25 + Math.floor(Math.random() * 30);
+              let numFlowers = 25 + Math.floor(Math.random() * 30);
+              if (usePerformance) numFlowers = Math.floor(numFlowers * 0.3);
               const patchRadius = 8 + Math.random() * 12;
               for (let fl = 0; fl < numFlowers; fl++) {
                 const fAngle = Math.random() * Math.PI * 2;
@@ -2306,11 +2342,13 @@ export default function FlightSimulator() {
         }
 
         // 2. STONE GARDENS & ROCK PILE CLUSTERS
-        const stoneGardenCount = 8 + Math.floor(Math.random() * 8);
+        let stoneGardenCount = 8 + Math.floor(Math.random() * 8);
+        if (usePerformance) stoneGardenCount = Math.floor(stoneGardenCount * 0.4);
         for (let sg = 0; sg < stoneGardenCount; sg++) {
           let cx = 0, cz = 0, cy = 0;
           let found = false;
-          for (let attempts = 0; attempts < 30; attempts++) {
+          const maxStoneAttempts = usePerformance ? 10 : 30;
+          for (let attempts = 0; attempts < maxStoneAttempts; attempts++) {
             cx = xOffset + (Math.random() - 0.5) * CHUNK_SIZE * 0.85;
             cz = zOffset + (Math.random() - 0.5) * CHUNK_SIZE * 0.85;
             const { height } = getTerrainHeightAndBiome(cx, cz);
@@ -2323,7 +2361,8 @@ export default function FlightSimulator() {
           if (!found) continue;
 
           // Spawn 15 to 30 rocks piled and clustered closely
-          const numRocks = 15 + Math.floor(Math.random() * 15);
+          let numRocks = 15 + Math.floor(Math.random() * 15);
+          if (usePerformance) numRocks = Math.floor(numRocks * 0.3);
           const rad = 15 + Math.random() * 12;
           let rockType = "rockAlpine";
           if (chunkBiome === BiomeType.Volcanic) rockType = "rockVolcanic";
@@ -2356,11 +2395,13 @@ export default function FlightSimulator() {
         }
 
         // 3. SHORELINE REED GROVES
-        const reedGroveCount = 12 + Math.floor(Math.random() * 10);
+        let reedGroveCount = 12 + Math.floor(Math.random() * 10);
+        if (usePerformance) reedGroveCount = Math.floor(reedGroveCount * 0.3);
         for (let rg = 0; rg < reedGroveCount; rg++) {
           let cx = 0, cz = 0, cy = 0;
           let found = false;
-          for (let attempts = 0; attempts < 60; attempts++) {
+          const maxReedAttempts = usePerformance ? 15 : 60;
+          for (let attempts = 0; attempts < maxReedAttempts; attempts++) {
             cx = xOffset + (Math.random() - 0.5) * CHUNK_SIZE * 0.85;
             cz = zOffset + (Math.random() - 0.5) * CHUNK_SIZE * 0.85;
             const { height } = getTerrainHeightAndBiome(cx, cz);
@@ -2373,7 +2414,8 @@ export default function FlightSimulator() {
           if (!found) continue;
 
           // Spawn 45 to 85 reed stalks tightly clumped for a lush shoreline
-          const numReeds = 45 + Math.floor(Math.random() * 40);
+          let numReeds = 45 + Math.floor(Math.random() * 40);
+          if (usePerformance) numReeds = Math.floor(numReeds * 0.3);
           const rad = 12 + Math.random() * 12;
 
           for (let rIdx = 0; rIdx < numReeds; rIdx++) {
@@ -2409,13 +2451,15 @@ export default function FlightSimulator() {
 
         // 4. BIOME-SPECIFIC VEGETATION PATCHES (Desert Cactus Patches & Volcanic Basalt Columns)
         if (chunkBiome === BiomeType.Badlands) {
-          const cactusPatchCount = 12 + Math.floor(Math.random() * 9);
+          let cactusPatchCount = 12 + Math.floor(Math.random() * 9);
+          if (usePerformance) cactusPatchCount = Math.floor(cactusPatchCount * 0.3);
           for (let cp = 0; cp < cactusPatchCount; cp++) {
             const cx = xOffset + (Math.random() - 0.5) * CHUNK_SIZE * 0.8;
             const cz = zOffset + (Math.random() - 0.5) * CHUNK_SIZE * 0.8;
             const { height } = getTerrainHeightAndBiome(cx, cz);
             if (height > WATER_LEVEL + 5.0 && height < 240) {
-              const numCacti = 40 + Math.floor(Math.random() * 30);
+              let numCacti = 40 + Math.floor(Math.random() * 30);
+              if (usePerformance) numCacti = Math.floor(numCacti * 0.35);
               const rad = 20 + Math.random() * 15;
               for (let c = 0; c < numCacti; c++) {
                 const angle = Math.random() * Math.PI * 2;
@@ -2443,13 +2487,15 @@ export default function FlightSimulator() {
             }
           }
         } else if (chunkBiome === BiomeType.Volcanic) {
-          const basaltPatchCount = 12 + Math.floor(Math.random() * 9);
+          let basaltPatchCount = 12 + Math.floor(Math.random() * 9);
+          if (usePerformance) basaltPatchCount = Math.floor(basaltPatchCount * 0.3);
           for (let bp = 0; bp < basaltPatchCount; bp++) {
             const cx = xOffset + (Math.random() - 0.5) * CHUNK_SIZE * 0.8;
             const cz = zOffset + (Math.random() - 0.5) * CHUNK_SIZE * 0.8;
             const { height } = getTerrainHeightAndBiome(cx, cz);
             if (height > WATER_LEVEL + 5.0 && height < 250) {
-              const numBasalts = 55 + Math.floor(Math.random() * 45);
+              let numBasalts = 55 + Math.floor(Math.random() * 45);
+              if (usePerformance) numBasalts = Math.floor(numBasalts * 0.3);
               const rad = 20 + Math.random() * 15;
               for (let b = 0; b < numBasalts; b++) {
                 const angle = Math.random() * Math.PI * 2;
@@ -2479,8 +2525,8 @@ export default function FlightSimulator() {
           if (matrices.length > 0) {
             const config = instancedMeshConfig[key];
             const instMesh = new THREE.InstancedMesh(config.geometry, config.material, matrices.length);
-            instMesh.castShadow = true;
-            instMesh.receiveShadow = true;
+            instMesh.castShadow = !usePerformance;
+            instMesh.receiveShadow = !usePerformance;
             for (let i = 0; i < matrices.length; i++) {
               instMesh.setMatrixAt(i, matrices[i]);
             }
@@ -4371,6 +4417,28 @@ export default function FlightSimulator() {
                       ))}
                     </div>
                   </div>
+
+                  {/* Performance Mode Switch */}
+                  <div className="mt-2 pt-2 border-t border-slate-900 flex flex-col gap-1.5">
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        const newVal = !performanceMode;
+                        setPerformanceMode(newVal);
+                        performanceModeRef.current = newVal;
+                        localStorage.setItem("flight_sim_performance_mode", newVal ? "true" : "false");
+                      }}
+                      className={`w-full py-1 text-[9px] border rounded cursor-pointer transition flex items-center justify-center gap-1.5 min-h-[28px] ${
+                        performanceMode
+                          ? "bg-emerald-600 text-white border-emerald-600 font-extrabold shadow-md animate-pulse"
+                          : "bg-transparent text-slate-300 border-slate-800 hover:bg-slate-900"
+                      }`}
+                      title="Activate performance optimizations for mobile & tablet (disables shadow casting, lowers grid resolution, reduces vegetation density)"
+                    >
+                      <span className="text-xs">⚡</span>
+                      <span className="font-bold tracking-wider uppercase">PERFORMANCE MODE: {performanceMode ? "ON" : "OFF"}</span>
+                    </button>
+                  </div>
                 </div>
               </div>
             </div>
@@ -4412,14 +4480,32 @@ export default function FlightSimulator() {
                 </h1>
 
                 {gameState === "ready" ? (
-                  <>
+                  <div className="flex flex-col items-center gap-4">
                     <button
                       onClick={handleStartEngines}
                       className="px-10 py-4 bg-sky-600 hover:bg-sky-500 text-white font-extrabold tracking-widest rounded-lg cursor-pointer transition-all duration-300 shadow-md hover:shadow-lg transform hover:scale-105 active:scale-95 text-lg"
                     >
                       START ENGINES
                     </button>
-                  </>
+
+                    <button
+                      onClick={() => {
+                        const newVal = !performanceMode;
+                        setPerformanceMode(newVal);
+                        performanceModeRef.current = newVal;
+                        localStorage.setItem("flight_sim_performance_mode", newVal ? "true" : "false");
+                      }}
+                      className={`px-4 py-2 text-[10px] sm:text-xs border rounded-lg cursor-pointer transition flex items-center gap-2 max-w-xs ${
+                        performanceMode
+                          ? "bg-emerald-600 text-white border-emerald-600 font-bold shadow-md"
+                          : "bg-slate-900/60 text-slate-300 border-slate-800 hover:bg-slate-800"
+                      }`}
+                      title="Toggle performance optimizations for mobile or older hardware (reduces vegetation, grid resolution, and lighting shadow complexity)"
+                    >
+                      <span>⚡ PERFORMANCE MODE:</span>
+                      <span className="font-extrabold">{performanceMode ? "ENABLED (60 FPS)" : "DISABLED (MAX QUALITY)"}</span>
+                    </button>
+                  </div>
                 ) : (
                   <div className="flex flex-col items-center gap-3">
                     <div className="w-10 h-10 border-4 border-sky-500/30 border-t-sky-500 rounded-full animate-spin" />
