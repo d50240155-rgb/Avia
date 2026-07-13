@@ -3573,20 +3573,23 @@ export default function FlightSimulator() {
               }
 
               // Smoothly blend the terrain floor to tunnel level as the player approaches the cave entrance/exit
-              if (Math.abs(dx) < dynamicRadius) {
-                let entranceBlend = 0.0;
-                if (Math.abs(lz) <= halfDepth) {
-                  entranceBlend = 1.0; // fully inside
-                } else {
-                  const distToTunnel = Math.abs(lz) - halfDepth; // 0 to 65
-                  entranceBlend = Math.max(0, 1.0 - distToTunnel / 65.0);
-                }
-
-                if (entranceBlend > 0.0) {
-                  insideCaveTunnel = true;
-                  activeCaveFloorY = THREE.MathUtils.lerp(currentTerrainY, cave.y, entranceBlend);
-                }
+              insideCaveTunnel = true;
+              let entranceBlend = 0.0;
+              if (Math.abs(lz) <= halfDepth) {
+                entranceBlend = 1.0; // fully inside
+              } else {
+                const distToTunnel = Math.abs(lz) - halfDepth; // 0 to 65
+                entranceBlend = Math.max(0, 1.0 - distToTunnel / 65.0);
               }
+
+              // Define the safe cave floor bottom below the center line
+              const caveFloorY = cave.y - Math.min(22.0, dynamicRadius * 0.15);
+              // Use the minimum of terrain and cave floor as base, to instantly drop the mountain obstruction
+              activeCaveFloorY = THREE.MathUtils.lerp(
+                Math.min(currentTerrainY, caveFloorY),
+                caveFloorY,
+                entranceBlend
+              );
 
               // Ellipse distance check for the arch ceiling
               const ellipseDist = Math.sqrt((dx * dx) / (dynamicRadius * dynamicRadius) + (dy * dy) / (rY * rY));
