@@ -192,6 +192,36 @@ export default function FlightSimulator() {
     return saved !== null ? parseInt(saved, 10) : 2;
   });
 
+  const [isFullscreen, setIsFullscreen] = useState<boolean>(false);
+
+  const toggleFullscreen = () => {
+    if (!document.fullscreenElement) {
+      document.documentElement.requestFullscreen().then(() => {
+        setIsFullscreen(true);
+      }).catch((err) => {
+        console.warn("Failed to enter fullscreen:", err);
+      });
+    } else {
+      if (document.exitFullscreen) {
+        document.exitFullscreen().then(() => {
+          setIsFullscreen(false);
+        }).catch((err) => {
+          console.warn("Failed to exit fullscreen:", err);
+        });
+      }
+    }
+  };
+
+  useEffect(() => {
+    const handleFullscreenChange = () => {
+      setIsFullscreen(!!document.fullscreenElement);
+    };
+    document.addEventListener("fullscreenchange", handleFullscreenChange);
+    return () => {
+      document.removeEventListener("fullscreenchange", handleFullscreenChange);
+    };
+  }, []);
+
   // HUD collapse/expand states (persisted via localStorage)
   const [hudReadoutExpanded, setHudReadoutExpanded] = useState<boolean>(() => {
     const saved = localStorage.getItem("flight_sim_hud_readout_expanded");
@@ -244,6 +274,52 @@ export default function FlightSimulator() {
   useEffect(() => {
     performanceModeRef.current = performanceMode;
     localStorage.setItem("flight_sim_performance_mode", String(performanceMode));
+
+    // Dynamically apply optimizations to the running 3D scene!
+    const g = gameRef.current;
+    if (g && g.renderer) {
+      // 1. Lower pixel ratio on mobile in performance mode to prevent massive GPU overhead on high-DPI screens
+      g.renderer.setPixelRatio(performanceMode ? 1.0 : Math.min(window.devicePixelRatio, 2.0));
+      
+      // 2. Toggle shadow mapping on/off
+      g.renderer.shadowMap.enabled = !performanceMode;
+      g.renderer.shadowMap.needsUpdate = true;
+
+      // 3. Disable shadow casting for directional lights
+      if (g.lights) {
+        if (g.lights.sun) {
+          g.lights.sun.castShadow = !performanceMode;
+        }
+        if (g.lights.moon) {
+          g.lights.moon.castShadow = !performanceMode;
+        }
+      }
+
+      // 4. Force immediate rebuild of terrain chunks with performance mesh densities and shadow configurations
+      if (g.terrainManager) {
+        g.terrainManager.clearAll();
+        if (g.airplane) {
+          g.terrainManager.update(g.airplane.mesh.position);
+        }
+      }
+
+      // 5. Update shadow casting flag for airplane meshes
+      if (g.airplane && g.airplane.mesh) {
+        g.airplane.mesh.traverse((node) => {
+          if (node instanceof THREE.Mesh) {
+            node.castShadow = !performanceMode;
+            node.receiveShadow = !performanceMode;
+            if (node.material) {
+              if (Array.isArray(node.material)) {
+                node.material.forEach((m) => { m.needsUpdate = true; });
+              } else {
+                node.material.needsUpdate = true;
+              }
+            }
+          }
+        });
+      }
+    }
   }, [performanceMode]);
 
   useEffect(() => {
@@ -2660,6 +2736,13 @@ export default function FlightSimulator() {
         }
       }
 
+      clearAll() {
+        for (const chunk of this.chunks.values()) {
+          chunk.destroy();
+        }
+        this.chunks.clear();
+      }
+
       update(playerPos: THREE.Vector3) {
         // Center the background water on the airplane coordinates to prevent boundary edges
         if (this.bgWater) {
@@ -3467,11 +3550,10 @@ export default function FlightSimulator() {
             const lz = dx_world * sinY + dz_world * cosY;
             const ly = g.airplane.mesh.position.y - cave.y;
 
-            // Check depth bounds with leeway
+            // Check depth bounds with generous entry/exit transition padding
             const halfDepth = cave.depth / 2;
-            if (Math.abs(lz) <= halfDepth + 18.0) {
-              // Calculate wiggle and dynamic radius scale at this Z progress (matching creation)
-              const zProgress = lz / cave.depth; // -0.5 to 0.5
+            if (Math.abs(lz) <= halfDepth + 65.0) {
+              const zProgress = Math.max(-0.5, Math.min(0.5, lz / cave.depth)); // clamp progress inside depth
               const wiggleX = Math.sin(zProgress * Math.PI * 1.5) * cave.wiggleAmpX;
               const wiggleY = Math.cos(zProgress * Math.PI * 1.5) * (cave.radius * 0.08);
 
@@ -3483,32 +3565,50 @@ export default function FlightSimulator() {
               const dy = ly - wiggleY;
 
               const rY = dynamicRadius * cave.heightMult;
+
+              // If the player is completely above the cave's highest rocks or wide of its sides, bypass cave collision completely
+              const maxRockOffset = 25.0; // standard rock size buffer
+              if (Math.abs(dx) > dynamicRadius + maxRockOffset || ly > rY + maxRockOffset) {
+                continue;
+              }
+
+              // Smoothly blend the terrain floor to tunnel level as the player approaches the cave entrance/exit
+              if (Math.abs(dx) < dynamicRadius) {
+                let entranceBlend = 0.0;
+                if (Math.abs(lz) <= halfDepth) {
+                  entranceBlend = 1.0; // fully inside
+                } else {
+                  const distToTunnel = Math.abs(lz) - halfDepth; // 0 to 65
+                  entranceBlend = Math.max(0, 1.0 - distToTunnel / 65.0);
+                }
+
+                if (entranceBlend > 0.0) {
+                  insideCaveTunnel = true;
+                  activeCaveFloorY = THREE.MathUtils.lerp(currentTerrainY, cave.y, entranceBlend);
+                }
+              }
+
+              // Ellipse distance check for the arch ceiling
               const ellipseDist = Math.sqrt((dx * dx) / (dynamicRadius * dynamicRadius) + (dy * dy) / (rY * rY));
 
               if (dy >= 0) {
-                // Inside the upper arch: safe if inside tunnel or above arch. 
-                // Adjusted thresholds for much more forgiving, satisfying fly-throughs!
-                if (ellipseDist >= 0.86 && ellipseDist <= 1.25) {
+                // Inside the upper arch shell: safe if inside tunnel or above arch. 
+                // Highly forgiving thresholds for satisfying fly-throughs!
+                if (ellipseDist >= 0.88 && ellipseDist <= 1.18) {
                   hitCave = true;
-                } else if (ellipseDist >= 0.78 && ellipseDist < 0.86) {
+                } else if (ellipseDist >= 0.80 && ellipseDist < 0.88) {
                   nearCaveWall = true;
-                } else if (ellipseDist < 0.78) {
-                  insideCaveTunnel = true;
-                  activeCaveFloorY = cave.y;
                 }
               } else {
                 // Below arch center: pillars are at dx = ±dynamicRadius
                 const pillarDistL = Math.abs(dx + dynamicRadius);
                 const pillarDistR = Math.abs(dx - dynamicRadius);
-                const thickness = 16.0; // rock pillar collision thickness (reduced from 28 for high forgiveness)
+                const thickness = 14.0; // rock pillar collision thickness (forgiving)
                 
                 if (pillarDistL < thickness || pillarDistR < thickness) {
                   hitCave = true;
                 } else if (pillarDistL < thickness + 10.0 || pillarDistR < thickness + 10.0) {
                   nearCaveWall = true;
-                } else if (Math.abs(dx) < dynamicRadius - thickness) {
-                  insideCaveTunnel = true;
-                  activeCaveFloorY = cave.y;
                 }
               }
             }
@@ -4051,7 +4151,7 @@ export default function FlightSimulator() {
         <div className="absolute inset-0 w-full h-full pointer-events-none font-mono z-10 text-slate-300">
           {/* Top Left Cockpit Readout */}
           {hudReadoutExpanded ? (
-            <div className="absolute top-5 left-5 bg-slate-950/80 border border-slate-800 backdrop-blur-md rounded-lg p-3 min-w-[180px] shadow-lg pointer-events-auto flex flex-col gap-1.5 transition-all duration-300">
+            <div className="absolute top-3 left-3 md:top-5 md:left-5 bg-slate-950/80 border border-slate-800 backdrop-blur-md rounded-lg p-3 min-w-[180px] shadow-lg pointer-events-auto flex flex-col gap-1.5 transition-all duration-300 scale-[0.8] origin-top-left md:scale-100">
               <div 
                 onClick={() => setHudReadoutExpanded(false)}
                 className="flex items-center justify-between text-[10px] text-sky-400 font-bold uppercase tracking-wider cursor-pointer border-b border-slate-900 pb-1.5 mb-1 select-none"
@@ -4089,7 +4189,7 @@ export default function FlightSimulator() {
           ) : (
             <button
               onClick={() => setHudReadoutExpanded(true)}
-              className="absolute top-5 left-5 w-9 h-9 rounded-full bg-slate-950/80 border border-slate-800 backdrop-blur-md flex items-center justify-center text-sky-400 hover:text-white hover:border-sky-500 transition shadow-lg cursor-pointer pointer-events-auto select-none"
+              className="absolute top-3 left-3 md:top-5 md:left-5 w-9 h-9 rounded-full bg-slate-950/80 border border-slate-800 backdrop-blur-md flex items-center justify-center text-sky-400 hover:text-white hover:border-sky-500 transition shadow-lg cursor-pointer pointer-events-auto select-none scale-[0.8] origin-top-left md:scale-100"
               title="Expand Telemetry"
             >
               ▶
@@ -4098,7 +4198,7 @@ export default function FlightSimulator() {
 
           {/* Left Side Interactive Throttle Control (Perfect for left thumb on mobile) */}
           {hudThrottleExpanded ? (
-            <div className="absolute top-[165px] left-5 bg-slate-950/80 border border-slate-800 backdrop-blur-md rounded-lg p-2.5 shadow-lg pointer-events-auto select-none flex flex-col items-center gap-1.5 transition-all duration-300">
+            <div className="absolute top-[135px] left-3 md:top-[165px] md:left-5 bg-slate-950/80 border border-slate-800 backdrop-blur-md rounded-lg p-2.5 shadow-lg pointer-events-auto select-none flex flex-col items-center gap-1.5 transition-all duration-300 scale-[0.8] origin-top-left md:scale-100">
               <div 
                 onClick={() => setHudThrottleExpanded(false)}
                 className="text-[9px] text-sky-400/80 tracking-wider font-semibold uppercase pb-1 border-b border-slate-800/80 w-full text-center flex items-center justify-between gap-2 cursor-pointer"
@@ -4134,7 +4234,7 @@ export default function FlightSimulator() {
           ) : (
             <button
               onClick={() => setHudThrottleExpanded(true)}
-              className="absolute top-[165px] left-5 w-9 h-9 rounded-full bg-slate-950/80 border border-slate-800 backdrop-blur-md flex items-center justify-center text-sky-400 hover:text-white hover:border-sky-500 transition shadow-lg cursor-pointer pointer-events-auto select-none"
+              className="absolute top-[135px] left-3 md:top-[165px] md:left-5 w-9 h-9 rounded-full bg-slate-950/80 border border-slate-800 backdrop-blur-md flex items-center justify-center text-sky-400 hover:text-white hover:border-sky-500 transition shadow-lg cursor-pointer pointer-events-auto select-none scale-[0.8] origin-top-left md:scale-100"
               title="Expand Throttle"
             >
               ▶
@@ -4143,7 +4243,7 @@ export default function FlightSimulator() {
 
           {/* Top Right Navigation & Environmental Sensors */}
           {hudEnvironmentExpanded ? (
-            <div className="absolute top-5 right-5 bg-slate-950/80 border border-slate-800 backdrop-blur-md rounded-lg p-3 min-w-[200px] text-right shadow-lg pointer-events-auto transition-all duration-300">
+            <div className="absolute top-3 right-3 md:top-5 md:right-5 bg-slate-950/80 border border-slate-800 backdrop-blur-md rounded-lg p-3 min-w-[200px] text-right shadow-lg pointer-events-auto transition-all duration-300 scale-[0.8] origin-top-right md:scale-100">
               <div 
                 onClick={() => setHudEnvironmentExpanded(false)}
                 className="flex items-center justify-between text-[10px] text-sky-400 font-bold uppercase tracking-wider cursor-pointer border-b border-slate-900 pb-1.5 mb-1.5 select-none"
@@ -4181,7 +4281,7 @@ export default function FlightSimulator() {
           ) : (
             <button
               onClick={() => setHudEnvironmentExpanded(true)}
-              className="absolute top-5 right-5 w-9 h-9 rounded-full bg-slate-950/80 border border-slate-800 backdrop-blur-md flex items-center justify-center text-sky-400 hover:text-white hover:border-sky-500 transition shadow-lg cursor-pointer pointer-events-auto select-none"
+              className="absolute top-3 right-3 md:top-5 md:right-5 w-9 h-9 rounded-full bg-slate-950/80 border border-slate-800 backdrop-blur-md flex items-center justify-center text-sky-400 hover:text-white hover:border-sky-500 transition shadow-lg cursor-pointer pointer-events-auto select-none scale-[0.8] origin-top-right md:scale-100"
               title="Expand Sensors"
             >
               ◀
@@ -4197,7 +4297,7 @@ export default function FlightSimulator() {
 
           {/* Electronic Flight Horizon Indicator */}
           {hudHorizonExpanded ? (
-            <div className="absolute bottom-8 left-1/2 -translate-x-1/2 min-w-[240px] border border-slate-800 rounded-xl overflow-hidden bg-slate-950/60 backdrop-blur-md shadow-lg flex flex-col pointer-events-auto transition-all duration-300">
+            <div className="absolute bottom-4 left-1/2 -translate-x-1/2 min-w-[240px] border border-slate-800 rounded-xl overflow-hidden bg-slate-950/60 backdrop-blur-md shadow-lg flex flex-col pointer-events-auto transition-all duration-300 scale-[0.8] origin-bottom md:scale-100">
               <div 
                 onClick={() => setHudHorizonExpanded(false)}
                 className="text-[9px] text-sky-400 font-bold uppercase tracking-wider py-1 px-3 border-b border-slate-900 bg-slate-950/40 flex items-center justify-between cursor-pointer select-none"
@@ -4213,7 +4313,7 @@ export default function FlightSimulator() {
           ) : (
             <button
               onClick={() => setHudHorizonExpanded(true)}
-              className="absolute bottom-8 left-1/2 -translate-x-1/2 w-9 h-9 rounded-full bg-slate-950/80 border border-slate-800 backdrop-blur-md flex items-center justify-center text-sky-400 hover:text-white hover:border-sky-500 transition shadow-lg cursor-pointer pointer-events-auto select-none"
+              className="absolute bottom-4 left-1/2 -translate-x-1/2 w-9 h-9 rounded-full bg-slate-950/80 border border-slate-800 backdrop-blur-md flex items-center justify-center text-sky-400 hover:text-white hover:border-sky-500 transition shadow-lg cursor-pointer pointer-events-auto select-none scale-[0.8] origin-bottom md:scale-100"
               title="Expand Horizon"
             >
               ▲
@@ -4222,7 +4322,7 @@ export default function FlightSimulator() {
 
           {/* Environmental Controller / Weather and Time (Interactive Cockpit controls) */}
           {hudSettingsExpanded ? (
-            <div className="absolute bottom-5 right-5 bg-slate-950/85 border border-slate-800 backdrop-blur-md rounded-xl p-3 shadow-xl pointer-events-auto flex flex-col gap-2 max-w-[280px] min-w-[250px] transition-all duration-300">
+            <div className="absolute bottom-3 right-3 md:bottom-5 md:right-5 bg-slate-950/85 border border-slate-800 backdrop-blur-md rounded-xl p-3 shadow-xl pointer-events-auto flex flex-col gap-2 max-w-[280px] min-w-[250px] transition-all duration-300 scale-[0.8] origin-bottom-right md:scale-100 max-h-[75vh] overflow-y-auto">
               <div 
                 onClick={() => setHudSettingsExpanded(false)}
                 className="text-xs text-sky-400 border-b border-slate-800/80 pb-1.5 font-bold flex items-center justify-between cursor-pointer select-none"
@@ -4439,13 +4539,32 @@ export default function FlightSimulator() {
                       <span className="font-bold tracking-wider uppercase">PERFORMANCE MODE: {performanceMode ? "ON" : "OFF"}</span>
                     </button>
                   </div>
+
+                  {/* Fullscreen Mode Switch */}
+                  <div className="mt-2 pt-2 border-t border-slate-900 flex flex-col gap-1.5">
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        toggleFullscreen();
+                      }}
+                      className={`w-full py-1 text-[9px] border rounded cursor-pointer transition flex items-center justify-center gap-1.5 min-h-[28px] ${
+                        isFullscreen
+                          ? "bg-indigo-600 text-white border-indigo-600 font-extrabold shadow-md"
+                          : "bg-transparent text-slate-300 border-slate-800 hover:bg-slate-900"
+                      }`}
+                      title="Toggle Fullscreen Mode"
+                    >
+                      <span className="text-xs">📺</span>
+                      <span className="font-bold tracking-wider uppercase">{isFullscreen ? "EXIT FULLSCREEN" : "FULLSCREEN MODE"}</span>
+                    </button>
+                  </div>
                 </div>
               </div>
             </div>
           ) : (
             <button
               onClick={() => setHudSettingsExpanded(true)}
-              className="absolute bottom-5 right-5 w-9 h-9 rounded-full bg-slate-950/85 border border-slate-800 backdrop-blur-md flex items-center justify-center text-sky-400 hover:text-white hover:border-sky-500 transition shadow-lg cursor-pointer pointer-events-auto select-none"
+              className="absolute bottom-3 right-3 md:bottom-5 md:right-5 w-9 h-9 rounded-full bg-slate-950/85 border border-slate-800 backdrop-blur-md flex items-center justify-center text-sky-400 hover:text-white hover:border-sky-500 transition shadow-lg cursor-pointer pointer-events-auto select-none scale-[0.8] origin-bottom-right md:scale-100"
               title="Expand Controls"
             >
               ▲
@@ -4488,23 +4607,38 @@ export default function FlightSimulator() {
                       START ENGINES
                     </button>
 
-                    <button
-                      onClick={() => {
-                        const newVal = !performanceMode;
-                        setPerformanceMode(newVal);
-                        performanceModeRef.current = newVal;
-                        localStorage.setItem("flight_sim_performance_mode", newVal ? "true" : "false");
-                      }}
-                      className={`px-4 py-2 text-[10px] sm:text-xs border rounded-lg cursor-pointer transition flex items-center gap-2 max-w-xs ${
-                        performanceMode
-                          ? "bg-emerald-600 text-white border-emerald-600 font-bold shadow-md"
-                          : "bg-slate-900/60 text-slate-300 border-slate-800 hover:bg-slate-800"
-                      }`}
-                      title="Toggle performance optimizations for mobile or older hardware (reduces vegetation, grid resolution, and lighting shadow complexity)"
-                    >
-                      <span>⚡ PERFORMANCE MODE:</span>
-                      <span className="font-extrabold">{performanceMode ? "ENABLED (60 FPS)" : "DISABLED (MAX QUALITY)"}</span>
-                    </button>
+                    <div className="flex flex-col sm:flex-row gap-2 w-full justify-center">
+                      <button
+                        onClick={() => {
+                          const newVal = !performanceMode;
+                          setPerformanceMode(newVal);
+                          performanceModeRef.current = newVal;
+                          localStorage.setItem("flight_sim_performance_mode", newVal ? "true" : "false");
+                        }}
+                        className={`px-4 py-2 text-[10px] sm:text-xs border rounded-lg cursor-pointer transition flex items-center gap-2 justify-center ${
+                          performanceMode
+                            ? "bg-emerald-600 text-white border-emerald-600 font-bold shadow-md"
+                            : "bg-slate-900/60 text-slate-300 border-slate-800 hover:bg-slate-800"
+                        }`}
+                        title="Toggle performance optimizations for mobile or older hardware (reduces vegetation, grid resolution, and lighting shadow complexity)"
+                      >
+                        <span>⚡ PERFORMANCE:</span>
+                        <span className="font-extrabold">{performanceMode ? "ON" : "OFF"}</span>
+                      </button>
+
+                      <button
+                        onClick={toggleFullscreen}
+                        className={`px-4 py-2 text-[10px] sm:text-xs border rounded-lg cursor-pointer transition flex items-center gap-2 justify-center ${
+                          isFullscreen
+                            ? "bg-indigo-600 text-white border-indigo-600 font-bold shadow-md"
+                            : "bg-slate-900/60 text-slate-300 border-slate-800 hover:bg-slate-800"
+                        }`}
+                        title="Toggle fullscreen mode for immersive experience"
+                      >
+                        <span>📺 FULLSCREEN:</span>
+                        <span className="font-extrabold">{isFullscreen ? "ACTIVE" : "INACTIVE"}</span>
+                      </button>
+                    </div>
                   </div>
                 ) : (
                   <div className="flex flex-col items-center gap-3">
